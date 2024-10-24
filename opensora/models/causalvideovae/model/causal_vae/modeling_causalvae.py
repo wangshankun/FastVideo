@@ -1,33 +1,19 @@
-try:
-    import torch_npu
-    from opensora.npu_config import npu_config
-except:
-    torch_npu = None
-    npu_config = None
+
 from ..modeling_videobase import VideoBaseAE
 from ..modules import Normalize
 from ..modules.ops import nonlinearity
-from typing import List, Tuple
+from typing import Tuple
 import torch.nn as nn
 
 from ..utils.module_utils import resolve_str_to_obj, Module
 from ..utils.distrib_utils import DiagonalGaussianDistribution
-from ..utils.scheduler_utils import cosine_scheduler
-from ...utils.utils import custom_to_video
+
 
 import torch
 from diffusers.configuration_utils import register_to_config
 from copy import deepcopy
 import os
-import glob
 
-import numpy as np
-from ...eval.cal_psnr import calculate_psnr
-from decord import VideoReader, cpu
-from pytorchvideo.transforms import ShortSideScale
-from torchvision.io import read_video
-from torchvision.transforms import Lambda, Compose
-from torchvision.transforms._transforms_video import CenterCropVideo
 
 class Encoder(nn.Module):
     def __init__(
@@ -147,11 +133,7 @@ class Encoder(nn.Module):
         h = self.mid.block_1(h)
         h = self.mid.attn_1(h)
         h = self.mid.block_2(h)
-
-        if npu_config is None:
-            h = self.norm_out(h)
-        else:
-            h = npu_config.run_group_norm(self.norm_out, h)
+        h = self.norm_out(h)
         h = nonlinearity(h)
         h = self.conv_out(h)
         return h
@@ -264,16 +246,9 @@ class Decoder(nn.Module):
                 h = self.up[i_level].upsample(h)
             if hasattr(self.up[i_level], "time_upsample"):
                 h = self.up[i_level].time_upsample(h)
-        if npu_config is None:
-            h = self.norm_out(h)
-        else:
-            h = npu_config.run_group_norm(self.norm_out, h)
+        h = self.norm_out(h)
         h = nonlinearity(h)
-        if npu_config is None:
-            h = self.conv_out(h)
-        else:
-            h_dtype = h.dtype
-            h = npu_config.run_conv3d(self.conv_out, h, h_dtype)
+        h = self.conv_out(h)
         return h
 
 
@@ -595,7 +570,7 @@ class CausalVAEModel(VideoBaseAE):
         self.enable_tiling(False)
 
     def init_from_ckpt(self, path, ignore_keys=list()):
-        sd = torch.load(path, map_location="cpu")
+        sd = torch.load(path, map_location="cpu", weights_only=True)
         print("init from " + path)
         
         if "ema_state_dict" in sd and len(sd['ema_state_dict']) > 0 and os.environ.get("NOT_USE_EMA_MODEL", 0) == 0:

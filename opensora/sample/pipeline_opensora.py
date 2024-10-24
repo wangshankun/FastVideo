@@ -34,10 +34,7 @@ from diffusers.utils import (
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline, ImagePipelineOutput
 
-try:
-    from opensora.npu_config import npu_config
-except:
-    npu_config = None
+
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 

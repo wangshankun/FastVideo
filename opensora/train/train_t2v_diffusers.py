@@ -13,7 +13,6 @@ import math
 import os
 import shutil
 from pathlib import Path
-from typing import Optional
 import gc
 import numpy as np
 from einops import rearrange
@@ -21,13 +20,10 @@ from tqdm import tqdm
 
 from opensora.adaptor.modules import replace_with_fp32_forwards
 
-
-
 from opensora.utils.parallel_states import initialize_sequence_parallel_state, \
     destroy_sequence_parallel_group, get_sequence_parallel_state, set_sequence_parallel_state
 from opensora.utils.communications import prepare_parallel_data, broadcast
 import time
-from dataclasses import field, dataclass
 from torch.utils.data import DataLoader
 from copy import deepcopy
 import accelerate
@@ -262,7 +258,6 @@ def main(args):
         interpolation_scale_w=args.interpolation_scale_w,
         interpolation_scale_t=args.interpolation_scale_t,
         downsampler=args.downsampler,
-        # compress_kv_factor=args.compress_kv_factor,
         use_rope=args.use_rope,
         # model_max_length=args.model_max_length,
         use_stable_fp32=args.enable_stable_fp32, 
@@ -482,7 +477,6 @@ def main(args):
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
     total_batch_size = total_batch_size // args.sp_size * args.train_sp_batch_size
     logger.info("***** Running training *****")
-    logger.info(f"  Model = {model}")
     logger.info(f"  Num examples = {len(train_dataset)}")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
     logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
@@ -678,7 +672,7 @@ def main(args):
                     log_validation(args, model, ae, text_enc.text_enc, train_dataset.tokenizer, accelerator,
                                    weight_dtype, progress_info.global_step)
 
-                    if args.use_ema and npu_config is None:
+                    if args.use_ema:
                         # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
                         ema_model.store(model.parameters())
                         ema_model.copy_to(model.parameters())
@@ -798,6 +792,7 @@ if __name__ == "__main__":
     parser.add_argument("--drop_short_ratio", type=float, default=1.0)
     parser.add_argument("--speed_factor", type=float, default=1.0)
     parser.add_argument("--num_frames", type=int, default=65)
+    parser.add_argument("--video_length_tolerance_range", type=int, default=2.0)
     parser.add_argument("--max_height", type=int, default=320)
     parser.add_argument("--max_width", type=int, default=240)
     parser.add_argument("--use_img_from_vid", action="store_true")
@@ -814,10 +809,8 @@ if __name__ == "__main__":
     parser.add_argument('--enable_8bit_t5', action='store_true')
     parser.add_argument('--tile_overlap_factor', type=float, default=0.125)
     parser.add_argument('--enable_tiling', action='store_true')
-    parser.add_argument("--compress_kv", action="store_true")
     parser.add_argument("--attention_mode", type=str, choices=['xformers', 'math', 'flash'], default="xformers")
     parser.add_argument('--use_rope', action='store_true')
-    parser.add_argument('--compress_kv_factor', type=int, default=1)
     parser.add_argument('--interpolation_scale_h', type=float, default=1.0)
     parser.add_argument('--interpolation_scale_w', type=float, default=1.0)
     parser.add_argument('--interpolation_scale_t', type=float, default=1.0)

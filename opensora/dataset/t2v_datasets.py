@@ -1,12 +1,6 @@
 import time
 import traceback
 
-try:
-    import torch_npu
-    from opensora.npu_config import npu_config
-except:
-    torch_npu = None
-    npu_config = None
 import glob
 import json
 import os, io, csv, math, random
@@ -119,7 +113,7 @@ def filter_resolution(h, w, max_h_div_w_ratio=17/16, min_h_div_w_ratio=8 / 16):
 
 
 class T2V_dataset(Dataset):
-    def __init__(self, args, transform, temporal_sample, tokenizer, transform_topcrop):
+    def __init__(self, args, transform, temporal_sample, tokenizer, transform_topcrop, video_length_tolerance_range):
         self.data = args.data
         self.num_frames = args.num_frames
         self.train_fps = args.train_fps
@@ -137,7 +131,7 @@ class T2V_dataset(Dataset):
         self.drop_short_ratio = args.drop_short_ratio
         assert self.speed_factor >= 1
         self.v_decoder = DecordInit()
-
+        self.video_length_tolerance_range = video_length_tolerance_range
         self.support_Chinese = True
         if not ('mt5' in args.text_encoder_name):
             self.support_Chinese = False
@@ -166,11 +160,8 @@ class T2V_dataset(Dataset):
             return data
         except Exception as e:
             logger.info(f'Error with {e}')
-            # 打印异常堆栈
             if idx in dataset_prog.cap_list:
                 logger.info(f"Caught an exception! {dataset_prog.cap_list[idx]}")
-            # traceback.print_exc()
-            # traceback.print_stack()
             return self.__getitem__(random.randint(0, self.__len__() - 1))
 
     def get_data(self, idx):
@@ -181,11 +172,6 @@ class T2V_dataset(Dataset):
             return self.get_image(idx)
     
     def get_video(self, idx):
-        # npu_config.print_msg(f"current idx is {idx}")
-        # video = random.choice([random_video_noise(65, 3, 336, 448), random_video_noise(65, 3, 1024, 1024), random_video_noise(65, 3, 360, 480)])
-        # # print('random shape', video.shape)
-        # input_ids = torch.ones(1, 120).to(torch.long).squeeze(0)
-        # cond_mask = torch.cat([torch.ones(1, 60).to(torch.long), torch.ones(1, 60).to(torch.long)], dim=1).squeeze(0)
 
         video_path = dataset_prog.cap_list[idx]['path']
         assert os.path.exists(video_path), f"file {video_path} do not exist!"
@@ -293,6 +279,7 @@ class T2V_dataset(Dataset):
                     is_pick = filter_resolution(height, width, max_h_div_w_ratio=hw_aspect_thr*aspect, 
                                                 min_h_div_w_ratio=1/hw_aspect_thr*aspect)
                     if not is_pick:
+                        print("resolution mismatch")
                         cnt_resolution_mismatch += 1
                         continue
 
@@ -304,12 +291,9 @@ class T2V_dataset(Dataset):
                 # import ipdb;ipdb.set_trace()
                 i['num_frames'] = int(fps * duration)
                 # max 5.0 and min 1.0 are just thresholds to filter some videos which have suitable duration. 
-                if i['num_frames'] > 2.0 * (self.num_frames * fps / self.train_fps * self.speed_factor):  # too long video is not suitable for this training stage (self.num_frames)
+                if i['num_frames'] / fps > self.video_length_tolerance_range * (self.num_frames / self.train_fps * self.speed_factor):  # too long video is not suitable for this training stage (self.num_frames)
                     cnt_too_long += 1
                     continue
-                # if i['num_frames'] < 1.0/1 * (self.num_frames * fps / self.train_fps * self.speed_factor):  # too short video is not suitable for this training stage
-                #     cnt_too_short += 1
-                #     continue 
 
                 # resample in case high fps, such as 50/60/90/144 -> train_fps(e.g, 24)
                 frame_interval = fps / self.train_fps
@@ -405,17 +389,6 @@ class T2V_dataset(Dataset):
             cap_lists += sub_list
         return cap_lists
 
-    # def get_img_cap_list(self):
-    #     use_image_num = self.use_image_num if self.use_image_num != 0 else 1
-    #     if npu_config is None:
-    #         img_cap_lists = self.read_jsons(self.image_data, postfix=".jpg")
-    #         img_cap_lists = [img_cap_lists[i: i + use_image_num] for i in range(0, len(img_cap_lists), use_image_num)]
-    #     else:
-    #         img_cap_lists = npu_config.try_load_pickle("img_cap_lists_all",
-    #                                                    lambda: self.read_jsons(self.image_data, postfix=".jpg"))
-    #         img_cap_lists = [img_cap_lists[i: i + use_image_num] for i in range(0, len(img_cap_lists), use_image_num)]
-    #         img_cap_lists = img_cap_lists[npu_config.get_local_rank()::npu_config.N_NPU_PER_NODE]
-    #     return img_cap_lists[:-1]  # drop last to avoid error length
 
     def get_cap_list(self):
         cap_lists = self.read_jsons(self.data)
