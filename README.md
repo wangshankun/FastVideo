@@ -7,37 +7,30 @@ Change the index-url cuda version according to your system.
 conda create -n fastvideo python=3.10.12
 conda activate fastvideo
 pip3 install torch==2.5.0 torchvision  --index-url https://download.pytorch.org/whl/cu121
-pip3 install -U xformers --index-url https://download.pytorch.org/whl/cu121
+pip3 install -U xformers==0.0.28.post2 --index-url https://download.pytorch.org/whl/cu121
 cd .. && git clone  https://github.com/huggingface/diffusers
 cd diffusers && git checkout mochi && pip install -e . && cd ../FastVideo
 ```
 
 ```
 pip install -e . && pip install -e ".[train]"
-apt-get update && apt install screen && pip install watch gpustat
+sudo apt-get update && apt install screen && pip install watch gpustat
 ```
 
 ## Prepare Data & Models
 We've prepared some debug data to facilitate development. To make sure the training pipeline is correct, train on the debug data and make sure the model overfit on it (feed it the same text prompt and see if the output video is the same as the training data)
+
 ```
 python scripts/download_hf.py --repo_id=Stealths-Video/dummyVid --local_dir=data/dummyVid --repo_type=dataset
-python scripts/download_hf.py --repo_id=LanguageBind/Open-Sora-Plan-v1.2.0  --file_name vae/checkpoint.ckpt --local_dir=data/Open-Sora-Plan-v1.2.0 --repo_type=model 
-python scripts/download_hf.py --repo_id=LanguageBind/Open-Sora-Plan-v1.2.0  --file_name vae/config.json --local_dir=data/Open-Sora-Plan-v1.2.0 --repo_type=model 
-python scripts/download_hf.py --repo_id=LanguageBind/Open-Sora-Plan-v1.2.0  --file_name 29x480p/config.json --local_dir=data/Open-Sora-Plan-v1.2.0 --repo_type=model
-python scripts/download_hf.py --repo_id=LanguageBind/Open-Sora-Plan-v1.2.0  --file_name 29x480p/diffusion_pytorch_model.safetensors --local_dir=data/Open-Sora-Plan-v1.2.0 --repo_type=model
 python scripts/download_hf.py --repo_id=Stealths-Video/mochi --local_dir=data/mochi --repo_type=model
+python scripts/download_hf.py --repo_id=Stealths-Video/Mochi-Synthetic-Data --local_dir=data/Mochi-Synthetic-Data --repo_type=dataset
 ```
 
+## How to overfit
 ```
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-tokenizer = AutoTokenizer.from_pretrained("google/mt5-xxl", cache_dir="data/.cache")
-model = AutoModelForSeq2SeqLM.from_pretrained("google/mt5-xxl", cache_dir="data/.cache")
+bash t2v_debug_multi.sh
 ```
-## Debug Training
-```
-bash t2v_debug_single.sh
-```
-
+Make sure to edit data/Mochi-Synthetic-Data/videos2caption.json such that this is only one video in the dataset (you can copy multiple annotations of the same video). Also make sure to edit the prompt in scripts/overfit.shto match the prompt in the training data. I observe the overfitting  after 50 steps. 
 
 ## TODO
 
