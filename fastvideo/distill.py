@@ -93,7 +93,7 @@ def reshard_fsdp(model):
     for m in FSDP.fsdp_modules(model):
         if m._has_params and m.sharding_strategy is not ShardingStrategy.NO_SHARD:
             torch.distributed.fsdp._runtime_utils._reshard(m, m._handle, True)
-def train_one_step_mochi(transformer, teacher_transformer, ema_transformer, optimizer, lr_scheduler,loader, noise_scheduler, solver,noise_random_generator, gradient_accumulation_steps, sp_size, precondition_outputs, max_grad_norm, uncond_prompt_embed, uncond_prompt_mask, num_euler_timesteps, multiphase, not_apply_cfg_solver, distill_cfg, ema_decay):
+def train_one_step_mochi(transformer, teacher_transformer, ema_transformer, optimizer, lr_scheduler,loader, noise_scheduler, solver,noise_random_generator, gradient_accumulation_steps, sp_size, precondition_outputs, max_grad_norm, uncond_prompt_embed, uncond_prompt_mask, num_euler_timesteps, multiphase, not_apply_cfg_solver, distill_cfg):
     total_loss = 0.0
     optimizer.zero_grad()
     for _ in range(gradient_accumulation_steps):
@@ -214,7 +214,7 @@ def train_one_step_mochi(transformer, teacher_transformer, ema_transformer, opti
         reshard_fsdp(ema_transformer)
         for p_averaged, p_model in zip(ema_transformer.parameters(), transformer.parameters()):
             with torch.no_grad():
-                p_averaged.copy_(torch.lerp(p_averaged.detach(), p_model.detach(), 1 - ema_decay))
+                p_averaged.copy_(torch.lerp(p_averaged.detach(), p_model.detach(), 1 - 0.95))
             
     grad_norm = transformer.clip_grad_norm_(max_grad_norm)
     optimizer.step()
@@ -515,8 +515,7 @@ def main(args):
                 return int(phase)
     for step in range(init_steps + 1, args.max_train_steps+1):
         start_time = time.time()
-        num_phases = get_num_phases(args.multi_phased_distill_schedule, step) if  args.multi_phased_distill_schedule is not None else args.validation_sampling_steps
-        loss, grad_norm= train_one_step_mochi(transformer,teacher_transformer, ema_transformer, optimizer, lr_scheduler, loader, noise_scheduler,solver, noise_random_generator, args.gradient_accumulation_steps, args.sp_size, args.precondition_outputs, args.max_grad_norm, uncond_prompt_embed, uncond_prompt_mask, args.num_euler_timesteps, num_phases, args.not_apply_cfg_solver,args.distill_cfg, args.ema_decay)
+        loss, grad_norm= train_one_step_mochi(transformer,teacher_transformer, ema_transformer, optimizer, lr_scheduler, loader, noise_scheduler,solver, noise_random_generator, args.gradient_accumulation_steps, args.sp_size, args.precondition_outputs, args.max_grad_norm, uncond_prompt_embed, uncond_prompt_mask, args.num_euler_timesteps, args.validation_sampling_steps, args.not_apply_cfg_solver,args.distill_cfg)
 
         step_time = time.time() - start_time
         step_times.append(step_time)
@@ -550,10 +549,10 @@ def main(args):
             dist.barrier()
         if args.log_validation and step  % args.validation_steps == 0:
             log_validation(args, transformer, device,
-                            torch.bfloat16, step, scheduler_type=args.scheduler_type, shift=args.shift, num_euler_timesteps=args.num_euler_timesteps,  linear_quadratic_threshold=args.linear_quadratic_threshold,linear_range=args.linear_range, ema=False)
+                            torch.bfloat16, step, scheduler_type=args.scheduler_type, shift=args.shift, num_euler_timesteps=args.num_euler_timesteps,  linear_quadratic_threshold=args.linear_quadratic_threshold, ema=False)
             if args.use_ema:
                 log_validation(args, ema_transformer, device,
-                                torch.bfloat16, step, scheduler_type=args.scheduler_type, shift=args.shift, num_euler_timesteps=args.num_euler_timesteps, linear_quadratic_threshold=args.linear_quadratic_threshold,linear_range=args.linear_range, ema=True)
+                                torch.bfloat16, step, scheduler_type=args.scheduler_type, shift=args.shift, num_euler_timesteps=args.num_euler_timesteps, linear_quadratic_threshold=args.linear_quadratic_threshold, ema=True)
 
     if args.use_lora:
         save_lora_checkpoint(transformer, optimizer, rank, args.output_dir, args.max_train_steps)
@@ -583,7 +582,7 @@ if __name__ == "__main__":
     parser.add_argument('--enable_stable_fp32', action='store_true') # TODO
 
     # diffusion setting
-    parser.add_argument("--ema_decay", type=float, default=0.999)
+    parser.add_argument("--ema_decay", type=float, default=0.95)
     parser.add_argument("--ema_start_step", type=int, default=0)
     parser.add_argument('--cfg', type=float, default=0.1)
     parser.add_argument("--precondition_outputs", action="store_true", help="Whether to precondition the outputs of the model.")
@@ -674,10 +673,8 @@ if __name__ == "__main__":
     # ["euler_linear_quadratic", "pcm", "pcm_linear_qudratic"]
     parser.add_argument("--scheduler_type", type=str, default="pcm", help="The scheduler type to use.")
     parser.add_argument("--linear_quadratic_threshold", type=float, default=0.025, help="Threshold for linear quadratic scheduler.")
-    parser.add_argument("--linear_range", type=float, default=0.5, help="Range for linear quadratic scheduler.")
     parser.add_argument("--weight_decay", type=float, default=0.001, help="Weight decay to apply.")
     parser.add_argument("--use_ema", action="store_true", help="Whether to use EMA.")
-    parser.add_argument("--ema_decay", type=float, default=0.95, help="EMA decay.")
     parser.add_argument("--multi_phased_distill_schedule", type=str, default=None) 
     args = parser.parse_args()
     main(args)
