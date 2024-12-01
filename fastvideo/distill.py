@@ -93,9 +93,24 @@ def reshard_fsdp(model):
     for m in FSDP.fsdp_modules(model):
         if m._has_params and m.sharding_strategy is not ShardingStrategy.NO_SHARD:
             torch.distributed.fsdp._runtime_utils._reshard(m, m._handle, True)
-def train_one_step_mochi(transformer, teacher_transformer, ema_transformer, optimizer, lr_scheduler,loader, noise_scheduler, solver,noise_random_generator, gradient_accumulation_steps, sp_size, precondition_outputs, max_grad_norm, uncond_prompt_embed, uncond_prompt_mask, num_euler_timesteps, multiphase, not_apply_cfg_solver, distill_cfg):
+            
+def get_norm(model_pred, norms, gradient_accumulation_steps):
+    fro_norm = torch.linalg.matrix_norm(model_pred, ord="fro") / gradient_accumulation_steps
+    largest_singular_value = torch.linalg.matrix_norm(model_pred, ord=2) / gradient_accumulation_steps
+    absolute_mean = torch.mean(torch.abs(model_pred)) / gradient_accumulation_steps
+    absolute_max = torch.max(torch.abs(model_pred)) / gradient_accumulation_steps
+    dist.all_reduce(fro_norm, op=dist.ReduceOp.AVG)
+    dist.all_reduce(largest_singular_value, op=dist.ReduceOp.AVG)
+    dist.all_reduce(absolute_mean, op=dist.ReduceOp.AVG)
+    norms["fro"] += torch.mean(fro_norm).item()     
+    norms["largest singular value"] += torch.mean(largest_singular_value).item()
+    norms["absolute mean"] += absolute_mean.item()
+    norms["absolute max"] += absolute_max.item()
+    
+def train_one_step_mochi(transformer, teacher_transformer, ema_transformer, optimizer, lr_scheduler,loader, noise_scheduler, solver,noise_random_generator, gradient_accumulation_steps, sp_size, precondition_outputs, max_grad_norm, uncond_prompt_embed, uncond_prompt_mask, num_euler_timesteps, multiphase, not_apply_cfg_solver, distill_cfg, ema_decay, pred_decay_weight, pred_decay_type):
     total_loss = 0.0
     optimizer.zero_grad()
+    model_pred_norm = {"fro": 0.0, "largest singular value": 0.0, "absolute mean": 0.0, "absolute max": 0.0}
     for _ in range(gradient_accumulation_steps):
         latents, encoder_hidden_states, latents_attention_mask, encoder_attention_mask = next(loader)
         model_input = normalize_mochi_dit_input(latents)
@@ -187,9 +202,9 @@ def train_one_step_mochi(transformer, teacher_transformer, ema_transformer, opti
                         return_dict= False
                     )[0]
 
-        target, end_index = solver.euler_style_multiphase_pred(
-            x_prev, target_pred, index, multiphase, True
-        )
+            target, end_index = solver.euler_style_multiphase_pred(
+                x_prev, target_pred, index, multiphase, True
+            )
 
 
         huber_c = 0.001 
@@ -199,13 +214,25 @@ def train_one_step_mochi(transformer, teacher_transformer, ema_transformer, opti
                 (model_pred.float() - target.float()) ** 2 + huber_c**2
             )
             - huber_c
-        )
+        ) / gradient_accumulation_steps
+        if pred_decay_weight > 0:
+            if pred_decay_type == "l1":
+                pred_decay_loss = torch.mean(torch.sqrt(model_pred.float() ** 2 )) * pred_decay_weight / gradient_accumulation_steps
+                loss += pred_decay_loss
+            elif pred_decay_type == "l2":
+                # essnetially k2?
+                pred_decay_loss = torch.mean(model_pred.float() ** 2 ) * pred_decay_weight / gradient_accumulation_steps
+                loss += pred_decay_loss
+            else:
+                assert NotImplementedError("pred_decay_type is not implemented")
 
-
+        # calculate model_pred norm and mean
+        get_norm(model_pred.detach().float(), model_pred_norm, gradient_accumulation_steps)
         loss.backward()
         
         avg_loss = loss.detach().clone()
         dist.all_reduce(avg_loss, op=dist.ReduceOp.AVG)
+        dist.all_reduce(pred_decay_loss.detach(), op=dist.ReduceOp.AVG)
         total_loss += avg_loss.item() 
         
 
@@ -214,14 +241,14 @@ def train_one_step_mochi(transformer, teacher_transformer, ema_transformer, opti
         reshard_fsdp(ema_transformer)
         for p_averaged, p_model in zip(ema_transformer.parameters(), transformer.parameters()):
             with torch.no_grad():
-                p_averaged.copy_(torch.lerp(p_averaged.detach(), p_model.detach(), 1 - 0.95))
+                p_averaged.copy_(torch.lerp(p_averaged.detach(), p_model.detach(), 1 - ema_decay))
             
     grad_norm = transformer.clip_grad_norm_(max_grad_norm)
     optimizer.step()
     lr_scheduler.step()
     
     
-    return total_loss, grad_norm.item()
+    return total_loss, grad_norm.item(), model_pred_norm, pred_decay_loss.item()
         
 def get_lora_model(transformer, lora_config):
     transformer.requires_grad_(False)
@@ -513,9 +540,13 @@ def main(args):
             phase_step, phase = step_phases.split("-")
             if step <= int(phase_step):
                 return int(phase)
+        return phase
     for step in range(init_steps + 1, args.max_train_steps+1):
         start_time = time.time()
-        loss, grad_norm= train_one_step_mochi(transformer,teacher_transformer, ema_transformer, optimizer, lr_scheduler, loader, noise_scheduler,solver, noise_random_generator, args.gradient_accumulation_steps, args.sp_size, args.precondition_outputs, args.max_grad_norm, uncond_prompt_embed, uncond_prompt_mask, args.num_euler_timesteps, args.validation_sampling_steps, args.not_apply_cfg_solver,args.distill_cfg)
+        assert args.multi_phased_distill_schedule is not None
+        num_phases = get_num_phases(args.multi_phased_distill_schedule, step)
+
+        loss, grad_norm, pred_norm, aux_loss = train_one_step_mochi(transformer,teacher_transformer, ema_transformer, optimizer, lr_scheduler, loader, noise_scheduler,solver, noise_random_generator, args.gradient_accumulation_steps, args.sp_size, args.precondition_outputs, args.max_grad_norm, uncond_prompt_embed, uncond_prompt_mask, args.num_euler_timesteps, num_phases, args.not_apply_cfg_solver,args.distill_cfg, args.ema_decay , args.pred_decay_weight, args.pred_decay_type)
 
         step_time = time.time() - start_time
         step_times.append(step_time)
@@ -534,7 +565,12 @@ def main(args):
             "learning_rate": lr_scheduler.get_last_lr()[0],
             "step_time": step_time,
             "avg_step_time": avg_step_time,
-            "grad_norm": grad_norm 
+            "grad_norm": grad_norm ,
+            "pred_fro_norm": pred_norm["fro"],
+            "pred_largest_singular_value": pred_norm["largest singular value"],
+            "pred_absolute_mean": pred_norm["absolute mean"],
+            "pred_absolute_max": pred_norm["absolute max"],
+            "aux_loss": aux_loss,
         }, step=step)
         if step  % args.checkpointing_steps == 0:
             if args.use_lora:
@@ -549,10 +585,10 @@ def main(args):
             dist.barrier()
         if args.log_validation and step  % args.validation_steps == 0:
             log_validation(args, transformer, device,
-                            torch.bfloat16, step, scheduler_type=args.scheduler_type, shift=args.shift, num_euler_timesteps=args.num_euler_timesteps,  linear_quadratic_threshold=args.linear_quadratic_threshold, ema=False)
+                            torch.bfloat16, step, scheduler_type=args.scheduler_type, shift=args.shift, num_euler_timesteps=args.num_euler_timesteps,  linear_quadratic_threshold=args.linear_quadratic_threshold,linear_range=args.linear_range, ema=False)
             if args.use_ema:
                 log_validation(args, ema_transformer, device,
-                                torch.bfloat16, step, scheduler_type=args.scheduler_type, shift=args.shift, num_euler_timesteps=args.num_euler_timesteps, linear_quadratic_threshold=args.linear_quadratic_threshold, ema=True)
+                                torch.bfloat16, step, scheduler_type=args.scheduler_type, shift=args.shift, num_euler_timesteps=args.num_euler_timesteps, linear_quadratic_threshold=args.linear_quadratic_threshold,linear_range=args.linear_range, ema=True)
 
     if args.use_lora:
         save_lora_checkpoint(transformer, optimizer, rank, args.output_dir, args.max_train_steps)
@@ -589,7 +625,7 @@ if __name__ == "__main__":
     
     # validation & logs
     parser.add_argument("--validation_prompt_dir", type=str)
-    parser.add_argument("--validation_sampling_steps", type=int, default=64)
+    parser.add_argument("--validation_sampling_steps", type=str, default="64")
     parser.add_argument('--validation_guidance_scale', type=str, default="4.5")
 
     parser.add_argument('--validation_steps', type=float, default=64)
@@ -673,8 +709,12 @@ if __name__ == "__main__":
     # ["euler_linear_quadratic", "pcm", "pcm_linear_qudratic"]
     parser.add_argument("--scheduler_type", type=str, default="pcm", help="The scheduler type to use.")
     parser.add_argument("--linear_quadratic_threshold", type=float, default=0.025, help="Threshold for linear quadratic scheduler.")
+    parser.add_argument("--linear_range", type=float, default=0.5, help="Range for linear quadratic scheduler.")
     parser.add_argument("--weight_decay", type=float, default=0.001, help="Weight decay to apply.")
     parser.add_argument("--use_ema", action="store_true", help="Whether to use EMA.")
     parser.add_argument("--multi_phased_distill_schedule", type=str, default=None) 
+    parser.add_argument("--finetune_weight", type=float, default=0.0)
+    parser.add_argument("--pred_decay_weight", type=float, default=0.0)
+    parser.add_argument("--pred_decay_type", default="l1")
     args = parser.parse_args()
     main(args)

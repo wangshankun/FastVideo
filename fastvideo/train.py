@@ -227,7 +227,7 @@ def main(args):
         params_to_optimize,
         lr=args.learning_rate,
         betas=(0.9,0.999),
-        weight_decay=0.01,
+        weight_decay=args.weight_decay,
         eps=1e-8,
     )
 
@@ -249,7 +249,7 @@ def main(args):
                 last_epoch=init_steps - 1,
             )
     
-    train_dataset = LatentDataset(args.data_json_path, args.num_latent_t, args.cfg, args.uncond_prompt_dir)
+    train_dataset = LatentDataset(args.data_json_path, args.num_latent_t, args.cfg)
     sampler = LengthGroupedSampler(
                 args.train_batch_size,
                 rank=rank,
@@ -477,5 +477,6 @@ if __name__ == "__main__":
     )
     parser.add_argument("--lr_num_cycles", type=int, default=1, help="Number of cycles in the learning rate scheduler.")
     parser.add_argument("--lr_power", type=float, default=1.0, help="Power factor of the polynomial scheduler.",)
+    parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay to apply.")
     args = parser.parse_args()
     main(args)

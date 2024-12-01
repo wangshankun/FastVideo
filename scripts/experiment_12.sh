@@ -20,7 +20,7 @@ torchrun --nnodes 2 --nproc_per_node 8\
     --gradient_checkpointing\
     --train_batch_size=1\
     --num_latent_t 28\
-    --sp_size 2\
+    --sp_size 4\
     --train_sp_batch_size 2\
     --dataloader_num_workers 4\
     --gradient_accumulation_steps=1\
@@ -36,7 +36,7 @@ torchrun --nnodes 2 --nproc_per_node 8\
     --cfg 0.0\
     --ema_decay 0.999\
     --log_validation\
-    --output_dir="data/outputs/shift1_euler_50"\
+    --output_dir="$DATA_DIR/outputs/shift1_euler_50"\
     --tracker_project_name PCM \
     --num_frames  163 \
     --shift 1 \

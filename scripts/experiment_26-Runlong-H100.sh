@@ -1,20 +1,10 @@
-export WANDB_BASE_URL="https://api.wandb.ai"
-export WANDB_DIR="$HOME"
 export WANDB_MODE=online
 export WANDB_API_KEY=4f6de3765d6464f43e0506ec7d785641af645e73
-export LD_LIBRARY_PATH=/opt/amazon/efa/lib:/opt/aws-ofi-nccl/lib:$LD_LIBRARY_PATH
-export FI_PROVIDER=efa
-export FI_EFA_USE_DEVICE_RDMA=1
-export NCCL_PROTO=simple
 
-DATA_DIR=/data
-IP=10.4.131.23
 
-torchrun --nnodes 2 --nproc_per_node 8\
-    --node_rank=0 \
-    --rdzv_id=456 \
-    --rdzv_backend=c10d \
-    --rdzv_endpoint=$IP:29500 \
+DATA_DIR=data
+
+torchrun --nnodes 1 --nproc_per_node 8\
     fastvideo/distill.py\
     --seed 42\
     --pretrained_model_name_or_path $DATA_DIR/mochi\
@@ -24,8 +14,8 @@ torchrun --nnodes 2 --nproc_per_node 8\
     --gradient_checkpointing\
     --train_batch_size=1\
     --num_latent_t 28\
-    --sp_size 4\
-    --train_sp_batch_size 2\
+    --sp_size 1\
+    --train_sp_batch_size 1\
     --dataloader_num_workers 4\
     --gradient_accumulation_steps=1\
     --max_train_steps=4000\
@@ -38,14 +28,16 @@ torchrun --nnodes 2 --nproc_per_node 8\
     --allow_tf32\
     --ema_start_step 0\
     --cfg 0.0\
-    --ema_decay 0.999\
     --log_validation\
-    --output_dir="$DATA_DIR/outputs/lq_euler_50_thresh0.05_multiphaseshedule_125-16,250-8,375-4,500-2"\
+    --output_dir="$DATA_DIR/outputs/lq_euler_50_thres0.1_lrg_0.75_phase_ema0.95"\
     --tracker_project_name PCM \
     --num_frames  163 \
     --scheduler_type pcm_linear_quadratic \
-    --validation_guidance_scale "2.5,3.5,4.5" \
+    --validation_guidance_scale "0.5,1.5,2.5,4.5" \
     --num_euler_timesteps 50 \
-    --linear_quadratic_threshold 0.05 \
-    --multi_phased_distill_schedule "125-16,250-8,375-4,500-2"
+    --linear_quadratic_threshold 0.1 \
+    --linear_range 0.75 \
+    --multi_phased_distill_schedule "4000-1" \
+    --use_ema \
+    --ema_decay 0.95 
 
