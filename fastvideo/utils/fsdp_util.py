@@ -17,6 +17,7 @@ from torch.distributed.fsdp import (
     # ShardedStateDictConfig, # un-flattened param but shards, usable by other parallel schemes.
 )
 
+from fastvideo.utils.load import get_no_split_modules
 from fastvideo.models.mochi_hf.modeling_mochi import MochiTransformerBlock
 
 from functools import partial
@@ -35,13 +36,12 @@ non_reentrant_wrapper = partial(
 check_fn = lambda submodule: isinstance(submodule, MochiTransformerBlock)
 
 
-def apply_fsdp_checkpointing(model, p=1):
+def apply_fsdp_checkpointing(model, no_split_modules, p=1):
     # https://github.com/foundation-model-stack/fms-fsdp/blob/408c7516d69ea9b6bcd4c0f5efab26c0f64b3c2d/fms_fsdp/policies/ac_handler.py#L16
     """apply activation checkpointing to model
     returns None as model is updated directly
     """
     print(f"--> applying fdsp activation checkpointing...")
-
     block_idx = 0
     cut_off = 1 / 2
     # when passing p as a fraction number (e.g. 1/3), it will be interpreted
@@ -52,7 +52,7 @@ def apply_fsdp_checkpointing(model, p=1):
         nonlocal block_idx
         nonlocal cut_off
 
-        if isinstance(submodule, MochiTransformerBlock):
+        if isinstance(submodule, no_split_modules):
             block_idx += 1
             if block_idx * p >= cut_off:
                 cut_off += 1
@@ -80,16 +80,19 @@ def get_mixed_precision(master_weight_type="fp32"):
 
 
 def get_dit_fsdp_kwargs(
-    sharding_strategy, use_lora=False, cpu_offload=False, master_weight_type="fp32"
+    transformer,
+    sharding_strategy,
+    use_lora=False,
+    cpu_offload=False,
+    master_weight_type="fp32",
 ):
+    no_split_modules = get_no_split_modules(transformer)
     if use_lora:
         auto_wrap_policy = fsdp_auto_wrap_policy
     else:
         auto_wrap_policy = functools.partial(
             transformer_auto_wrap_policy,
-            transformer_layer_cls={
-                MochiTransformerBlock,
-            },
+            transformer_layer_cls=no_split_modules,
         )
 
     # we use float32 for fsdp but autocast during training
@@ -127,7 +130,7 @@ def get_dit_fsdp_kwargs(
             }
         )
 
-    return fsdp_kwargs
+    return fsdp_kwargs, no_split_modules
 
 
 def get_discriminator_fsdp_kwargs(master_weight_type="fp32"):

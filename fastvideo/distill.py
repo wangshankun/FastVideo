@@ -8,7 +8,7 @@ from fastvideo.utils.parallel_states import (
     nccl_info,
 )
 from fastvideo.utils.communications import sp_parallel_dataloader_wrapper, broadcast
-from fastvideo.models.mochi_hf.mochi_latents_utils import normalize_mochi_dit_input
+from fastvideo.models.mochi_hf.mochi_latents_utils import normalize_dit_input
 from fastvideo.utils.validation import log_validation
 import time
 from torch.utils.data import DataLoader
@@ -26,14 +26,14 @@ from fastvideo.utils.dataset_utils import LengthGroupedSampler
 import wandb
 from accelerate.utils import set_seed
 from tqdm.auto import tqdm
-from fastvideo.fsdp_util import get_dit_fsdp_kwargs, apply_fsdp_checkpointing
+from fastvideo.utils.fsdp_util import get_dit_fsdp_kwargs, apply_fsdp_checkpointing
 from diffusers import (
     FlowMatchEulerDiscreteScheduler,
 )
+from fastvideo.utils.load import get_no_split_modules, load_transformer
 from fastvideo.distill.solver import EulerSolver, extract_into_tensor
 from copy import deepcopy
 from diffusers.optimization import get_scheduler
-from fastvideo.models.mochi_hf.modeling_mochi import MochiTransformer3DModel
 from diffusers.utils import check_min_version
 from fastvideo.dataset.latent_datasets import LatentDataset, latent_collate_function
 import torch.distributed as dist
@@ -53,12 +53,13 @@ check_min_version("0.31.0")
 import time
 from collections import deque
 
+
 def main_print(content):
     if int(os.environ["LOCAL_RANK"]) <= 0:
         print(content)
 
 
-def save_checkpoint(transformer: MochiTransformer3DModel, rank, output_dir, step):
+def save_checkpoint(transformer, rank, output_dir, step):
     main_print(f"--> saving checkpoint at step {step}")
     with FSDP.state_dict_type(
         transformer,
@@ -74,6 +75,8 @@ def save_checkpoint(transformer: MochiTransformer3DModel, rank, output_dir, step
         weight_path = os.path.join(save_dir, "diffusion_pytorch_model.safetensors")
         save_file(cpu_state, weight_path)
         config_dict = dict(transformer.config)
+        if "dtype" in config_dict:
+            del config_dict["dtype"]  # TODO
         config_path = os.path.join(save_dir, "config.json")
         # save dict as json
         with open(config_path, "w") as f:
@@ -105,8 +108,9 @@ def get_norm(model_pred, norms, gradient_accumulation_steps):
     norms["absolute max"] += absolute_max.item()
 
 
-def train_one_step_mochi(
+def distill_one_step(
     transformer,
+    model_type,
     teacher_transformer,
     ema_transformer,
     optimizer,
@@ -127,6 +131,7 @@ def train_one_step_mochi(
     ema_decay,
     pred_decay_weight,
     pred_decay_type,
+    hunyuan_teacher_disable_cfg,
 ):
     total_loss = 0.0
     optimizer.zero_grad()
@@ -143,7 +148,7 @@ def train_one_step_mochi(
             latents_attention_mask,
             encoder_attention_mask,
         ) = next(loader)
-        model_input = normalize_mochi_dit_input(latents)
+        model_input = normalize_dit_input(model_type, latents)
         noise = torch.randn_like(model_input)
         bsz = model_input.shape[0]
         index = torch.randint(
@@ -163,16 +168,20 @@ def train_one_step_mochi(
             sigmas_prev * noise_scheduler.config.num_train_timesteps
         ).view(-1)
         noisy_model_input = sigmas * noise + (1.0 - sigmas) * model_input
-
         # Predict the noise residual
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            model_pred = transformer(
-                noisy_model_input,
-                encoder_hidden_states,
-                timesteps,
-                encoder_attention_mask,  # B, L
-                return_dict=False,
-            )[0]
+            teacher_kwargs = {
+                "hidden_states": noisy_model_input,
+                "encoder_hidden_states": encoder_hidden_states,
+                "timestep": timesteps,
+                "encoder_attention_mask": encoder_attention_mask,  # B, L
+                "return_dict": False,
+            }
+            if hunyuan_teacher_disable_cfg:
+                teacher_kwargs["guidance"] = torch.tensor(
+                    [1000.0], device=noisy_model_input.device, dtype=torch.bfloat16
+                )
+            model_pred = transformer(**teacher_kwargs)[0]
 
         # if accelerator.is_main_process:
         model_pred, end_index = solver.euler_style_multiphase_pred(
@@ -265,7 +274,6 @@ def train_one_step_mochi(
 
         avg_loss = loss.detach().clone()
         dist.all_reduce(avg_loss, op=dist.ReduceOp.AVG)
-        dist.all_reduce(pred_decay_loss.detach(), op=dist.ReduceOp.AVG)
         total_loss += avg_loss.item()
 
     # update ema
@@ -283,7 +291,7 @@ def train_one_step_mochi(
     optimizer.step()
     lr_scheduler.step()
 
-    return total_loss, grad_norm.item(), model_pred_norm, pred_decay_loss.item()
+    return total_loss, grad_norm.item(), model_pred_norm
 
 
 def main(args):
@@ -314,20 +322,14 @@ def main(args):
     # Create model:
 
     main_print(f"--> loading model from {args.pretrained_model_name_or_path}")
-    # keep the master weight to float32
-    if args.dit_model_name_or_path:
-        transformer = transformer = MochiTransformer3DModel.from_pretrained(
-            args.dit_model_name_or_path,
-            torch_dtype=torch.float32,
-            # torch_dtype=torch.bfloat16 if args.use_lora else torch.float32,
-        )
-    else:
-        transformer = MochiTransformer3DModel.from_pretrained(
-            args.pretrained_model_name_or_path,
-            subfolder="transformer",
-            torch_dtype=torch.float32,
-            # torch_dtype=torch.bfloat16 if args.use_lora else torch.float32,
-        )
+
+    transformer = load_transformer(
+        args.model_type,
+        args.dit_model_name_or_path,
+        args.pretrained_model_name_or_path,
+        torch.float32 if args.master_weight_type == "fp32" else torch.bfloat16,
+    )
+
     teacher_transformer = deepcopy(transformer)
     if args.use_ema:
         ema_transformer = deepcopy(transformer)
@@ -335,6 +337,7 @@ def main(args):
         ema_transformer = None
 
     if args.use_lora:
+        assert args.model_type == "mochi", "LoRA is only supported for Mochi model."
         transformer.requires_grad_(False)
         transformer_lora_config = LoraConfig(
             r=args.lora_rank,
@@ -350,7 +353,8 @@ def main(args):
     main_print(
         f"--> Initializing FSDP with sharding strategy: {args.fsdp_sharding_startegy}"
     )
-    fsdp_kwargs = get_dit_fsdp_kwargs(
+    fsdp_kwargs, no_split_modules = get_dit_fsdp_kwargs(
+        transformer,
         args.fsdp_sharding_startegy,
         args.use_lora,
         args.use_cpu_offload,
@@ -361,7 +365,7 @@ def main(args):
         transformer.config.lora_rank = args.lora_rank
         transformer.config.lora_alpha = args.lora_alpha
         transformer.config.lora_target_modules = ["to_k", "to_q", "to_v", "to_out.0"]
-        transformer._no_split_modules = ["MochiTransformerBlock"]
+        transformer._no_split_modules = no_split_modules
         fsdp_kwargs["auto_wrap_policy"] = fsdp_kwargs["auto_wrap_policy"](transformer)
 
     transformer = FSDP(
@@ -380,10 +384,16 @@ def main(args):
     main_print(f"--> model loaded")
 
     if args.gradient_checkpointing:
-        apply_fsdp_checkpointing(transformer, args.selective_checkpointing)
-        apply_fsdp_checkpointing(teacher_transformer, args.selective_checkpointing)
+        apply_fsdp_checkpointing(
+            transformer, no_split_modules, args.selective_checkpointing
+        )
+        apply_fsdp_checkpointing(
+            teacher_transformer, no_split_modules, args.selective_checkpointing
+        )
         if args.use_ema:
-            apply_fsdp_checkpointing(ema_transformer, args.selective_checkpointing)
+            apply_fsdp_checkpointing(
+                ema_transformer, no_split_modules, args.selective_checkpointing
+            )
     # Set model as trainable.
     transformer.train()
     teacher_transformer.requires_grad_(False)
@@ -546,8 +556,9 @@ def main(args):
         assert args.multi_phased_distill_schedule is not None
         num_phases = get_num_phases(args.multi_phased_distill_schedule, step)
 
-        loss, grad_norm, pred_norm, aux_loss = train_one_step_mochi(
+        loss, grad_norm, pred_norm = distill_one_step(
             transformer,
+            args.model_type,
             teacher_transformer,
             ema_transformer,
             optimizer,
@@ -568,6 +579,7 @@ def main(args):
             args.ema_decay,
             args.pred_decay_weight,
             args.pred_decay_type,
+            args.hunyuan_teacher_disable_cfg,
         )
 
         step_time = time.time() - start_time
@@ -595,7 +607,6 @@ def main(args):
                     "pred_largest_singular_value": pred_norm["largest singular value"],
                     "pred_absolute_mean": pred_norm["absolute mean"],
                     "pred_absolute_max": pred_norm["absolute max"],
-                    "aux_loss": aux_loss,
                 },
                 step=step,
             )
@@ -654,6 +665,10 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--model_type", type=str, default="mochi", help="The type of model to train."
+    )
 
     # dataset & dataloader
     parser.add_argument("--data_json_path", type=str, required=True)
@@ -888,9 +903,9 @@ if __name__ == "__main__":
     )
     parser.add_argument("--use_ema", action="store_true", help="Whether to use EMA.")
     parser.add_argument("--multi_phased_distill_schedule", type=str, default=None)
-    parser.add_argument("--finetune_weight", type=float, default=0.0)
     parser.add_argument("--pred_decay_weight", type=float, default=0.0)
     parser.add_argument("--pred_decay_type", default="l1")
+    parser.add_argument("--hunyuan_teacher_disable_cfg", action="store_true")
     parser.add_argument(
         "--master_weight_type",
         type=str,
