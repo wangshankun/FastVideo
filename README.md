@@ -21,21 +21,24 @@ FastVideo is a scalable framework for post-training video diffusion models, addr
 ## Change Log
 
 
-- ```2024/12/06```: `FastMochi` v0.0.1 is released.
+- ```2024/12/13```: `FastVideo` v0.0.1 is released.
 
 
 ## Fast and High-Quality Text-to-video Generation
 
-### 8-Step Results of FastMochi
+<table style="margin-left: auto; margin-right: auto; border: none;">
+  <tr>
+    <td>
+      <img src="assets/8steps/mochi-demo.gif" width="640" alt="Mochi Demo">
+    </td>
+  </tr>
+  <tr>
+    <td style="text-align:center;">
+      Get 8X diffusion boost for Mochi with FastVideo
+    </td>
+  </tr>
+</table>
 
-<table class="center">
-  <td><img src=assets/8steps/1.gif width="320"></td></td>
-  <td><img src=assets/8steps/2.gif width="320"></td></td></td>
-  <tr>
-  <td style="text-align:center;" width="320">tmp</td>
-  <td style="text-align:center;" width="320">tmp</td>
-  <tr>
-</table >
 
 
 ## Table of Contents
@@ -44,6 +47,7 @@ Jump to a specific section:
 
 - [🔧 Installation](#-installation)
 - [🚀 Inference](#-inference)
+- [🧱 Data Preprocess](#-data-preprocess)
 - [🎯 Distill](#-distill)
 - [⚡ Finetune](#-lora-finetune)
 
@@ -51,7 +55,7 @@ Jump to a specific section:
 ## 🔧 Installation
 
 ```
-conda create -n fastmochi python=3.10.0 -y && conda activate fastmochi
+conda create -n fastvideo python=3.10.0 -y && conda activate fastvideo
 pip3 install torch==2.5.0 torchvision --index-url https://download.pytorch.org/whl/cu121
 pip install packaging ninja && pip install flash-attn==2.7.0.post2 --no-build-isolation 
 pip install "git+https://github.com/huggingface/diffusers.git@bf64b32652a63a1865a0528a73a13652b201698b"
@@ -107,7 +111,42 @@ cd mochi
 
 python3 ./demos/cli.py --model_dir weights/ --cpu_offload
 ```
+## 🧱 Data Preprocess
 
+To reduce the memory cost and time consumption caused by VAE parsing during the distillation and finetune, we offload the VAE preprocess media part to Data Preprocess section.
+For data preprocess, we need to prepare a source folder for the media we wish to use and a json file for the source information of these media. 
+For image media, the json item needs to follow the following format:
+```
+{
+    "path": "0.jpg",
+    "cap": ["captions"]
+}
+```
+For video media, the json item needs to follow the following format:
+```
+{
+    "path": "1.mp4",
+    "resolution": {
+      "width": 848,
+      "height": 480
+    },
+    "fps": 30.0,
+    "duration": 6.033333333333333,
+    "cap": [
+      "caption"
+    ]
+  }
+```
+Use a txt file to contain the source folder for media and the json file for meta information
+
+```
+path_to_media_source_foder,path_to_json_file
+```
+Adjust the `DATA_MERGE_PATH` and `OUTPUT_DIR` in `./scripts/finetune_data_gen.sh` correspondingly and run
+```
+bash ./scripts/finetune_data_gen.sh
+```
+The preprocessed data will be put into the `OUTPUT_DIR` and the `videos2caption.json` can be used in finetune and distill scripts.
 
 ## 🎯 Distill
 
@@ -115,23 +154,11 @@ python3 ./demos/cli.py --model_dir weights/ --cpu_offload
 
 -  VRAM is required for both distill 10B mochi model
 
-To launch distillation, you will first need to prepare data in the following formats
-
-```bash
-asset/example_data
-├── AAA.txt
-├── AAA.png
-├── BCC.txt
-├── BCC.png
-├── ......
-├── CCC.txt
-└── CCC.png
-```
 
 We provide a dataset example here. First download testing data. Use [scripts/download_hf.py](scripts/download_hf.py) to download the data to a local directory. Use it like this:
 ```bash
-python scripts/download_hf.py --repo_id=Stealths-Video/Merge-425-Data --local_dir=data/Merge-425-Data --repo_type=dataset
-python scripts/download_hf.py --repo_id=Stealths-Video/validation_embeddings --local_dir=data/validation_embeddings --repo_type=dataset
+python scripts/download_hf.py --repo_id=FastVideo/Mochi-425-Data --local_dir=data/Mochi-425-Data --repo_type=dataset
+python scripts/download_hf.py --repo_id=FastVideo/validation_embeddings --local_dir=data/validation_embeddings --repo_type=dataset
 ```
 
 Then the distillation can be launched by:
