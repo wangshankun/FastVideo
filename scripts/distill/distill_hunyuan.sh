@@ -1,12 +1,10 @@
 export WANDB_BASE_URL="https://api.wandb.ai"
 export WANDB_MODE=online
-export WANDB_API_KEY=4f6de3765d6464f43e0506ec7d785641af645e73
-
 
 torchrun --nnodes 1 --nproc_per_node 4\
     fastvideo/distill_adv.py\
     --seed 42\
-    --pretrained_model_name_or_path data/hunyuan\
+    --pretrained_model_name_or_path data/FastHunyuan\
     --dit_model_name_or_path data/hunyuan/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt\
     --model_type "hunyuan" \
     --cache_dir "data/.cache"\
