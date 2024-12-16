@@ -22,7 +22,7 @@ FastVideo is an open framework for distilling, training, and inferencing large v
 
 As state-of-the-art video diffusion models grow in size and sequence length, their become prohibitive to use. For instance, sampling a 5-second 720P video with Hunyuan takes 13 minutes on 4 X A100. FastVideo aim to make large video diffusion models fast to infer and efficient to train, and thus making them more **accessible**. 
 
-We introduce FastMochi and FastHunyuan, distilled versions of the Mochi and Hunyuan video diffusion models. FastMochi achieves high-quality sampling with just 8 inference steps. FastHunyuan maintains sampling quality with only 4 inference steps.
+We introduce FastMochi and FastHunyuan, distilled versions of the Mochi and Hunyuan video diffusion models. The distilled models are 8X faster to sample.
 
 
 
@@ -31,7 +31,7 @@ Other than the distilled weight, FastVideo provides a pipeline for training, dis
 
 - **Scalable**: FastVideo supports FSDP, sequence parallelism, and selective gradient checkpointing. Our code seamlessly scales to 64 GPUs in our test.
 - **Memory Efficient**: FastVideo supports LoRA finetuning coupled with precomputed latents and text embeddings for minimal memory usage.
-- **Variable Sequence length**: You can finetuning with both image and videos.
+- **Variable Sequence length**: You can finetune with both image and videos.
 
 ## Change Log
 
@@ -39,7 +39,7 @@ Other than the distilled weight, FastVideo provides a pipeline for training, dis
 
 
 ## 🔧 Installation
-The code is tested on Python 3.10.0 and CUDA 12.1.
+The code is tested on Python 3.10.0, CUDA 12.1 and H100.
 
 ```
 ./env_setup.sh fastvideo
@@ -55,7 +55,7 @@ python scripts/huggingface/download_hf.py --repo_id=FastVideo/FastHunyuan --loca
 # change the gpu count inside the script
 sh scripts/inference/inference_hunyuan.sh
 ```
-
+You can also inference FastHunyuan in the [official Hunyuan github](https://github.com/Tencent/HunyuanVideo).
 ### FastMochi
 You can use FastMochi
 
@@ -64,12 +64,10 @@ You can use FastMochi
 python scripts/huggingface/download_hf.py --repo_id=FastVideo/FastMochi-diffusers --local_dir=data/FastMochi-diffusers --repo_type=model
 # CLI inference
 bash scripts/inference/inference_mochi_sp.sh
-# Gradio web dem
-python demo/gradio_web_demo.py --model_path data/FastMochi-diffusers --guidance_scale 1.5 --num_frames 163
 ```
 
 ## Distillation
-Please refer to the [distillation guide](docs/distilation.md).
+Please refer to the [distillation guide](docs/distillation.md).
 
 ## Finetuning
 Please refer to the [finetuning guide](docs/finetuning.md).
