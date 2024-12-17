@@ -30,7 +30,7 @@ Fast-Hunyuan comparison with original Hunyuan, achieving an 8X diffusion speed b
 
 https://github.com/user-attachments/assets/064ac1d2-11ed-4a0c-955b-4d412a96ef30
 
-Comparsion between OpenAI Sora, original Hunyuan and FastHunyuan
+Comparison between OpenAI Sora, original Hunyuan and FastHunyuan
 
 https://github.com/user-attachments/assets/d323b712-3f68-42b2-952b-94f6a49c4836
 
