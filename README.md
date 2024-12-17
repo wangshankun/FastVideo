@@ -51,15 +51,6 @@ The code is tested on Python 3.10.0, CUDA 12.1 and H100.
 ## 🚀 Inference
 We recommend using a GPU with 80GB of memory. To run the inference, use the following command:
 
-### FastMochi
-
-```bash
-# Download the model weight
-python scripts/huggingface/download_hf.py --repo_id=FastVideo/FastMochi-diffusers --local_dir=data/FastMochi-diffusers --repo_type=model
-# CLI inference
-bash scripts/inference/inference_mochi_sp.sh
-```
-
 ### FastHunyuan
 ```bash
 # Download the model weight
@@ -69,12 +60,65 @@ sh scripts/inference/inference_hunyuan.sh
 ```
 You can also inference FastHunyuan in the [official Hunyuan github](https://github.com/Tencent/HunyuanVideo).
 
+### FastMochi
 
-## Distillation
-Please refer to the [distillation guide](docs/distillation.md).
+```bash
+# Download the model weight
+python scripts/huggingface/download_hf.py --repo_id=FastVideo/FastMochi-diffusers --local_dir=data/FastMochi-diffusers --repo_type=model
+# CLI inference
+bash scripts/inference/inference_mochi_sp.sh
+```
 
-## Finetuning
-Please refer to the [finetuning guide](docs/finetuning.md).
+
+## 🎯 Distill
+Our distillation recipe is based on [Phased Consistency Model](https://github.com/G-U-N/Phased-Consistency-Model). We did not find significant improvement using multi-phase distillation, so we keep the one phase setup similar to the original latent consistency model's recipe.
+We use the [MixKit](https://huggingface.co/datasets/LanguageBind/Open-Sora-Plan-v1.1.0/tree/main/all_mixkit) dataset for distillation. To avoid running the text encoder and VAE during training, we preprocess all data to generate text embeddings and VAE latents.
+Preprocessing instructions can be found [data_preprocess.md](docs/data_preprocess.md). For convenience, we also provide preprocessed data that can be downloaded directly using the following command:
+```bash
+python scripts/huggingface/download_hf.py --repo_id=FastVideo/HD-Mixkit-Finetune-Hunyuan --local_dir=data/HD-Mixkit-Finetune-Hunyuan --repo_type=dataset
+```
+Next, download the original model weights with:
+```bash
+python scripts/huggingface/download_hf.py --repo_id=FastVideo/hunyuan --local_dir=data/hunyuan --repo_type=model
+```
+To launch the distillation process, use the following commands:
+```
+bash scripts/distill/distill_mochi.sh # for mochi
+bash scripts/distill/distill_hunyuan.sh # for hunyuan
+```
+We also provide an optional script for distillation with adversarial loss, located at `fastvideo/distill_adv.py`. Although we tried adversarial loss, we did not observe significant improvements.
+## Finetune
+### ⚡ Full Finetune
+Ensure your data is prepared and preprocessed in the format specified in [data_preprocess.md](docs/data_preprocess.md). For convenience, we also provide a mochi preprocessed Black Myth Wukong data that can be downloaded directly:
+```bash
+python scripts/huggingface/download_hf.py --repo_id=FastVideo/Mochi-Black-Myth --local_dir=data/Mochi-Black-Myth --repo_type=dataset
+```
+Download the original model weights with:
+```bash
+python scripts/huggingface/download_hf.py --repo_id=genmo/mochi-1-preview --local_dir=data/mochi --repo_type=model
+python scripts/huggingface/download_hf.py --repo_id=FastVideo/hunyuan --local_dir=data/hunyuan --repo_type=model
+```
+Then you can run the finetune with:
+```
+bash scripts/finetune/finetune_mochi.sh # for mochi
+```
+**Note that for finetuning, we did not tune the hyperparameters in the provided script**
+### ⚡ Lora Finetune
+Currently, we only provide Lora Finetune for Mochi model, the command for Lora Finetune is
+```
+bash scripts/finetune/finetune_mochi_lora.sh
+```
+### Minimum Hardware Requirement
+- 40 GB GPU memory each for 2 GPUs with lora
+- 30 GB GPU memory each for 2 GPUs with CPU offload and lora.
+### Finetune with Both Image and Video
+Our codebase support finetuning with both image and video. 
+```bash
+bash scripts/finetune/finetune_hunyuan.sh
+bash scripts/finetune/finetune_mochi_lora_mix.sh
+```
+For Image-Video Mixture Fine-tuning, make sure to enable the --group_frame option in your script.
+
 
 ## Acknowledgement
 We learned and reused code from the following projects: [PCM](https://github.com/G-U-N/Phased-Consistency-Model), [diffusers](https://github.com/huggingface/diffusers), [OpenSoraPlan](https://github.com/PKU-YuanGroup/Open-Sora-Plan), and [xDiT](https://github.com/xdit-project/xDiT).
