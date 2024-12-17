@@ -55,10 +55,12 @@ sh scripts/inference/inference_hunyuan.sh
 ```
 You can also inference FastHunyuan in the [official Hunyuan github](https://github.com/Tencent/HunyuanVideo).
 
-### More Demos
+## 🎥 More Demos
 
 https://github.com/user-attachments/assets/064ac1d2-11ed-4a0c-955b-4d412a96ef30
 
+
+https://github.com/user-attachments/assets/122cfa1a-e2a3-47a5-80c8-b8852d347d9a
 
 
 ## Distillation
@@ -68,6 +70,6 @@ Please refer to the [distillation guide](docs/distillation.md).
 Please refer to the [finetuning guide](docs/finetuning.md).
 
 ## Acknowledgement
-We learned and reused code from the following projects: [PCM](https://github.com/G-U-N/Phased-Consistency-Model), [diffusers](https://github.com/huggingface/diffusers) [OpenSoraPlan](https://github.com/PKU-YuanGroup/Open-Sora-Plan), and [xDiT](https://github.com/xdit-project/xDiT).
+We learned and reused code from the following projects: [PCM](https://github.com/G-U-N/Phased-Consistency-Model), [diffusers](https://github.com/huggingface/diffusers), [OpenSoraPlan](https://github.com/PKU-YuanGroup/Open-Sora-Plan), and [xDiT](https://github.com/xdit-project/xDiT).
 
 We thank MBZUAI and Anyscale for their support throughout this project.
