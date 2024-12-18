@@ -119,6 +119,15 @@ bash scripts/finetune/finetune_mochi_lora_mix.sh
 ```
 For Image-Video Mixture Fine-tuning, make sure to enable the --group_frame option in your script.
 
+## 📑 Development Plan
+
+- More distillation methods
+  - [ ] Add Distribution Matching Distillation
+- More models support
+  - [ ] Add CogvideoX model
+- Code update
+  - [ ] fp8 support
+  - [ ] faster load model and save model support
 
 ## Acknowledgement
 We learned and reused code from the following projects: [PCM](https://github.com/G-U-N/Phased-Consistency-Model), [diffusers](https://github.com/huggingface/diffusers), [OpenSoraPlan](https://github.com/PKU-YuanGroup/Open-Sora-Plan), and [xDiT](https://github.com/xdit-project/xDiT).
