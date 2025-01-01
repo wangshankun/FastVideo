@@ -425,7 +425,7 @@ def main(args):
         params_to_optimize,
         lr=args.learning_rate,
         betas=(0.9, 0.999),
-        weight_decay=1e-3,
+        weight_decay=args.weight_decay,
         eps=1e-8,
     )
 
@@ -433,7 +433,7 @@ def main(args):
         discriminator.parameters(),
         lr=args.discriminator_learning_rate,
         betas=(0, 0.999),
-        weight_decay=1e-3,
+        weight_decay=args.weight_decay,
         eps=1e-8,
     )
 
@@ -634,8 +634,7 @@ def main(args):
                 #     args.output_dir,
                 #     step,
                 # )
-                save_checkpoint(transformer, rank, args.output_dir,
-                                args.max_train_steps)
+                save_checkpoint(transformer, rank, args.output_dir, step)
             main_print(f"--> checkpoint saved at step {step}")
             dist.barrier()
         if args.log_validation and step % args.validation_steps == 0:
@@ -673,6 +672,8 @@ if __name__ == "__main__":
                         help="The type of model to train.")
     # dataset & dataloader
     parser.add_argument("--data_json_path", type=str, required=True)
+    parser.add_argument("--num_height", type=int, default=480)
+    parser.add_argument("--num_width", type=int, default=848)
     parser.add_argument("--num_frames", type=int, default=163)
     parser.add_argument(
         "--dataloader_num_workers",
@@ -922,6 +923,16 @@ if __name__ == "__main__":
         default=2,
         help="The stride of the discriminator head.",
     )
+    parser.add_argument(
+        "--linear_range",
+        type=float,
+        default=0.5,
+        help="Range for linear quadratic scheduler.",
+    )
+    parser.add_argument("--weight_decay",
+                        type=float,
+                        default=0.001,
+                        help="Weight decay to apply.")
     parser.add_argument(
         "--linear_quadratic_threshold",
         type=float,
