@@ -4,7 +4,6 @@ from typing import List, Optional, Union
 
 import numpy as np
 import torch
-import wandb
 from diffusers import FlowMatchEulerDiscreteScheduler
 from diffusers.utils import export_to_video
 from diffusers.utils.torch_utils import randn_tensor
@@ -12,6 +11,7 @@ from diffusers.video_processor import VideoProcessor
 from einops import rearrange
 from tqdm import tqdm
 
+import wandb
 from fastvideo.distill.solver import PCMFMScheduler
 from fastvideo.models.mochi_hf.pipeline_mochi import (
     linear_quadratic_schedule, retrieve_timesteps)
@@ -47,6 +47,7 @@ def prepare_latents(
 
 
 def sample_validation_video(
+    model_type,
     transformer,
     vae,
     scheduler,
@@ -105,7 +106,7 @@ def sample_validation_video(
     threshold_noise = 0.025
     sigmas = linear_quadratic_schedule(num_inference_steps, threshold_noise)
     sigmas = np.array(sigmas)
-    if scheduler_type == "euler":
+    if scheduler_type == "euler" and model_type == "mochi":  #todo
         timesteps, num_inference_steps = retrieve_timesteps(
             scheduler,
             num_inference_steps,
@@ -221,7 +222,7 @@ def log_validation(
         vae_spatial_scale_factor = 8
         vae_temporal_scale_factor = 6
         num_channels_latents = 12
-    elif args.model_type == "hunyuan":
+    elif args.model_type == "hunyuan" or "hunyuan_hf":
         vae_spatial_scale_factor = 8
         vae_temporal_scale_factor = 4
         num_channels_latents = 16
@@ -231,7 +232,7 @@ def log_validation(
                                        args.pretrained_model_name_or_path)
     vae.enable_tiling()
     if scheduler_type == "euler":
-        scheduler = FlowMatchEulerDiscreteScheduler()
+        scheduler = FlowMatchEulerDiscreteScheduler(shift=shift)
     else:
         linear_quadraic = True if scheduler_type == "pcm_linear_quadratic" else False
         scheduler = PCMFMScheduler(
@@ -286,14 +287,14 @@ def log_validation(
                     256, 4096).to(device).unsqueeze(0)
                 negative_prompt_attention_mask = (
                     torch.zeros(256).bool().to(device).unsqueeze(0))
-                generator = torch.Generator(device="cuda").manual_seed(12345)
+                generator = torch.Generator(device="cpu").manual_seed(12345)
                 video = sample_validation_video(
+                    args.model_type,
                     transformer,
                     vae,
                     scheduler,
                     scheduler_type=scheduler_type,
                     num_frames=args.num_frames,
-                    # Peiyuan TODO: remove hardcode
                     height=args.num_height,
                     width=args.num_width,
                     num_inference_steps=validation_sampling_step,

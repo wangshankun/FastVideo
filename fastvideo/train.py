@@ -23,6 +23,8 @@ from fastvideo.dataset.latent_datasets import (LatentDataset,
                                                latent_collate_function)
 from fastvideo.models.mochi_hf.mochi_latents_utils import normalize_dit_input
 from fastvideo.models.mochi_hf.pipeline_mochi import MochiPipeline
+from fastvideo.models.hunyuan_hf.pipeline_hunyuan import HunyuanVideoPipeline
+
 from fastvideo.utils.checkpoint import (resume_lora_optimizer, save_checkpoint,
                                         save_lora_checkpoint)
 from fastvideo.utils.communications import (broadcast,
@@ -143,20 +145,21 @@ def train_one_step(
             dtype=latents.dtype,
         )
         noisy_model_input = (1.0 - sigmas) * latents + sigmas * noise
-        # if rank<=0:
-        #     print("2222222222222222222222222222222222222222222222")
-        # print(type(latents_attention_mask))
-        # print(latents_attention_mask)
-        with torch.autocast("cuda", torch.bfloat16):
-            model_pred = transformer(
-                noisy_model_input,
-                encoder_hidden_states,
-                timesteps,
-                encoder_attention_mask,  # B, L
-                return_dict=False,
-            )[0]
-        # if rank<=0:
-        #     print("333333333333333333333333333333333333333333333333")
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            input_kwargs = {
+                "hidden_states": noisy_model_input,
+                "encoder_hidden_states": encoder_hidden_states,
+                "timestep": timesteps,
+                "encoder_attention_mask": encoder_attention_mask,  # B, L
+                "return_dict": False,
+            }
+            if 'hunyuan' in model_type:
+                input_kwargs["guidance"] = torch.tensor(
+                    [1000.0],
+                    device=noisy_model_input.device,
+                    dtype=torch.bfloat16)
+            model_pred = transformer(**input_kwargs)[0]
+
         if precondition_outputs:
             model_pred = noisy_model_input - model_pred * sigmas
         if precondition_outputs:
@@ -216,7 +219,11 @@ def main(args):
     )
 
     if args.use_lora:
-        assert args.model_type == "mochi", "LoRA is only supported for Mochi model."
+        assert args.model_type != "hunyuan", "LoRA is only supported for huggingface model. Please use hunyuan_hf for lora finetuning"
+        if args.model_type == "mochi":
+            pipe = MochiPipeline
+        elif args.model_type == "hunyuan_hf":
+            pipe = HunyuanVideoPipeline
         transformer.requires_grad_(False)
         transformer_lora_config = LoraConfig(
             r=args.lora_rank,
@@ -227,7 +234,7 @@ def main(args):
         transformer.add_adapter(transformer_lora_config)
 
     if args.resume_from_lora_checkpoint:
-        lora_state_dict = MochiPipeline.lora_state_dict(
+        lora_state_dict = pipe.lora_state_dict(
             args.resume_from_lora_checkpoint)
         transformer_state_dict = {
             f'{k.replace("transformer.", "")}': v
@@ -443,20 +450,24 @@ def main(args):
             if args.use_lora:
                 # Save LoRA weights
                 save_lora_checkpoint(transformer, optimizer, rank,
-                                     args.output_dir, step)
+                                     args.output_dir, step, pipe)
             else:
                 # Your existing checkpoint saving code
-                save_checkpoint(transformer, optimizer, rank, args.output_dir,
-                                step)
+                save_checkpoint(transformer, rank, args.output_dir, step)
             dist.barrier()
         if args.log_validation and step % args.validation_steps == 0:
-            log_validation(args, transformer, device, torch.bfloat16, step)
+            log_validation(args,
+                           transformer,
+                           device,
+                           torch.bfloat16,
+                           step,
+                           shift=args.shift)
 
     if args.use_lora:
         save_lora_checkpoint(transformer, optimizer, rank, args.output_dir,
-                             args.max_train_steps)
+                             args.max_train_steps, pipe)
     else:
-        save_checkpoint(transformer, optimizer, rank, args.output_dir,
+        save_checkpoint(transformer, rank, args.output_dir,
                         args.max_train_steps)
 
     if get_sequence_parallel_state():
@@ -465,10 +476,13 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_type",
-                        type=str,
-                        default="mochi",
-                        help="The type of model to train.")
+    parser.add_argument(
+        "--model_type",
+        type=str,
+        default="mochi",
+        help=
+        "The type of model to train. Currentlt support [mochi, hunyuan_hf, hunyuan]"
+    )
     # dataset & dataloader
     parser.add_argument("--data_json_path", type=str, required=True)
     parser.add_argument("--num_height", type=int, default=480)
@@ -553,6 +567,10 @@ if __name__ == "__main__":
          " checkpoints in case they are better than the last checkpoint, and are also suitable for resuming"
          " training using `--resume_from_checkpoint`."),
     )
+    parser.add_argument("--shift",
+                        type=float,
+                        default=1.0,
+                        help=("Set shift to 7 for hunyuan model."))
     parser.add_argument(
         "--resume_from_checkpoint",
         type=str,

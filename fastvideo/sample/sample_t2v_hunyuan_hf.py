@@ -1,51 +1,135 @@
 import argparse
-import io
+import json
 import os
 import time
 
-import imageio as iio
-import numpy as np
 import torch
-from diffusers import (BitsAndBytesConfig, HunyuanVideoPipeline,
-                       HunyuanVideoTransformer3DModel)
+import torch.distributed as dist
+from diffusers import BitsAndBytesConfig
+from diffusers.utils import export_to_video
+
+from fastvideo.models.hunyuan_hf.modeling_hunyuan import \
+    HunyuanVideoTransformer3DModel
+from fastvideo.models.hunyuan_hf.pipeline_hunyuan import HunyuanVideoPipeline
+from fastvideo.utils.parallel_states import (
+    initialize_sequence_parallel_state, nccl_info)
 
 
-def export_to_video_bytes(fps, frames):
-    request = iio.core.Request("<bytes>", mode="w", extension=".mp4")
-    pyavobject = iio.plugins.pyav.PyAVPlugin(request)
-    if isinstance(frames, np.ndarray):
-        frames = (np.array(frames) * 255).astype('uint8')
+def initialize_distributed():
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    local_rank = int(os.getenv("RANK", 0))
+    world_size = int(os.getenv("WORLD_SIZE", 1))
+    print("world_size", world_size)
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl",
+                            init_method="env://",
+                            world_size=world_size,
+                            rank=local_rank)
+    initialize_sequence_parallel_state(world_size)
+
+
+def inference(args):
+    initialize_distributed()
+    print(nccl_info.sp_size)
+    device = torch.cuda.current_device()
+    # Peiyuan: GPU seed will cause A100 and H100 to produce different results .....
+    weight_dtype = torch.bfloat16
+
+    if args.transformer_path is not None:
+        transformer = HunyuanVideoTransformer3DModel.from_pretrained(
+            args.transformer_path)
     else:
-        frames = np.array(frames)
-    new_bytes = pyavobject.write(frames, codec="libx264", fps=fps)
-    out_bytes = io.BytesIO(new_bytes)
-    return out_bytes
+        transformer = HunyuanVideoTransformer3DModel.from_pretrained(
+            args.model_path,
+            subfolder="transformer/",
+            torch_dtype=weight_dtype)
+
+    pipe = HunyuanVideoPipeline.from_pretrained(args.model_path,
+                                                transformer=transformer,
+                                                torch_dtype=weight_dtype)
+
+    pipe.enable_vae_tiling()
+
+    if args.lora_checkpoint_dir is not None:
+        print(f"Loading LoRA weights from {args.lora_checkpoint_dir}")
+        config_path = os.path.join(args.lora_checkpoint_dir,
+                                   "lora_config.json")
+        with open(config_path, "r") as f:
+            lora_config_dict = json.load(f)
+        rank = lora_config_dict["lora_params"]["lora_rank"]
+        lora_alpha = lora_config_dict["lora_params"]["lora_alpha"]
+        lora_scaling = lora_alpha / rank
+        pipe.load_lora_weights(args.lora_checkpoint_dir,
+                               adapter_name="default")
+        pipe.set_adapters(["default"], [lora_scaling])
+        print(
+            f"Successfully Loaded LoRA weights from {args.lora_checkpoint_dir}"
+        )
+    if args.cpu_offload:
+        pipe.enable_model_cpu_offload(device)
+    else:
+        pipe.to(device)
+
+    # Generate videos from the input prompt
+
+    if args.prompt_embed_path is not None:
+        prompt_embeds = (torch.load(args.prompt_embed_path,
+                                    map_location="cpu",
+                                    weights_only=True).to(device).unsqueeze(0))
+        encoder_attention_mask = (torch.load(
+            args.encoder_attention_mask_path,
+            map_location="cpu",
+            weights_only=True).to(device).unsqueeze(0))
+        prompts = None
+    elif args.prompt_path is not None:
+        prompts = [line.strip() for line in open(args.prompt_path, "r")]
+        prompt_embeds = None
+        encoder_attention_mask = None
+    else:
+        prompts = args.prompts
+        prompt_embeds = None
+        encoder_attention_mask = None
+
+    if prompts is not None:
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            for prompt in prompts:
+                generator = torch.Generator("cpu").manual_seed(args.seed)
+                video = pipe(
+                    prompt=[prompt],
+                    height=args.height,
+                    width=args.width,
+                    num_frames=args.num_frames,
+                    num_inference_steps=args.num_inference_steps,
+                    generator=generator,
+                ).frames
+                if nccl_info.global_rank <= 0:
+                    os.makedirs(args.output_path, exist_ok=True)
+                    suffix = prompt.split(".")[0]
+                    export_to_video(
+                        video[0],
+                        os.path.join(args.output_path, f"{suffix}.mp4"),
+                        fps=24,
+                    )
+    else:
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            generator = torch.Generator("cpu").manual_seed(args.seed)
+            videos = pipe(
+                prompt_embeds=prompt_embeds,
+                prompt_attention_mask=encoder_attention_mask,
+                height=args.height,
+                width=args.width,
+                num_frames=args.num_frames,
+                num_inference_steps=args.num_inference_steps,
+                generator=generator,
+            ).frames
+
+        if nccl_info.global_rank <= 0:
+            export_to_video(videos[0], args.output_path + ".mp4", fps=24)
 
 
-def export_to_video(frames, path, fps):
-    video_bytes = export_to_video_bytes(fps, frames)
-    video_bytes.seek(0)
-    with open(path, "wb") as f:
-        f.write(video_bytes.getbuffer())
-
-
-def main(args):
+def inference_quantization(args):
     torch.manual_seed(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    prompt_template = {
-        "template":
-        ("<|start_header_cid|>system<|end_header_id|>\n\nDescribe the video by detailing the following aspects: "
-         "1. The main content and theme of the video."
-         "2. The color, shape, size, texture, quantity, text, and spatial relationships of the contents, including objects, people, and anything else."
-         "3. Actions, events, behaviors temporal relationships, physical movement changes of the contents."
-         "4. Background environment, light, style, atmosphere, and qualities."
-         "5. Camera angles, movements, and transitions used in the video."
-         "6. Thematic and aesthetic concepts associated with the scene, i.e. realistic, futuristic, fairy tale, etc<|eot_id|>"
-         "<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|>"),
-        "crop_start":
-        95,
-    }
-
     model_id = args.model_path
 
     if args.quantization == "nf4":
@@ -106,7 +190,6 @@ def main(args):
             height=args.height,
             width=args.width,
             num_frames=args.num_frames,
-            prompt_template=prompt_template,
             num_inference_steps=args.num_inference_steps,
             generator=generator,
         ).frames[0]
@@ -125,15 +208,24 @@ if __name__ == "__main__":
 
     # Basic parameters
     parser.add_argument("--prompt", type=str, help="prompt file for inference")
+    parser.add_argument("--prompt_embed_path", type=str, default=None)
+    parser.add_argument("--prompt_path", type=str, default=None)
     parser.add_argument("--num_frames", type=int, default=16)
     parser.add_argument("--height", type=int, default=256)
     parser.add_argument("--width", type=int, default=256)
     parser.add_argument("--num_inference_steps", type=int, default=50)
     parser.add_argument("--model_path", type=str, default="data/hunyuan")
+    parser.add_argument("--transformer_path", type=str, default=None)
     parser.add_argument("--output_path", type=str, default="./outputs/video")
     parser.add_argument("--fps", type=int, default=24)
     parser.add_argument("--quantization", type=str, default=None)
     parser.add_argument("--cpu_offload", action="store_true")
+    parser.add_argument(
+        "--lora_checkpoint_dir",
+        type=str,
+        default=None,
+        help="Path to the directory containing LoRA checkpoints",
+    )
     # Additional parameters
     parser.add_argument(
         "--denoise-type",
@@ -181,11 +273,6 @@ if __name__ == "__main__":
         default="module",
         help=
         "Key to load the model states. 'module' for the main model, 'ema' for the EMA model.",
-    )
-    parser.add_argument(
-        "--use-cpu-offload",
-        action="store_true",
-        help="Use CPU offload for the model load.",
     )
     parser.add_argument(
         "--dit-weight",
@@ -279,4 +366,7 @@ if __name__ == "__main__":
     parser.add_argument("--text-len-2", type=int, default=77)
 
     args = parser.parse_args()
-    main(args)
+    if args.quantization:
+        inference_quantization(args)
+    else:
+        inference(args)

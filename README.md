@@ -37,6 +37,7 @@ Comparison between original FastHunyuan, LLM-INT8 quantized FastHunyuan and NF4 
 https://github.com/user-attachments/assets/cf89efb5-5f68-4949-a085-f41c1ef26c94
 
 ## Change Log
+- ```2025/01/13```: Support Lora finetuning for HunyuanVideo.
 - ```2024/12/25```: Enable single 4090 inference for `FastHunyuan`, please rerun the installation steps to update the environment.
 - ```2024/12/17```: `FastVideo` v1.0 is released.
 
@@ -55,7 +56,7 @@ We now support NF4 and LLM-INT8 quantized inference using BitsAndBytes for FastH
 # Download the model weight
 python scripts/huggingface/download_hf.py --repo_id=FastVideo/FastHunyuan-diffusers --local_dir=data/FastHunyuan-diffusers --repo_type=model
 # CLI inference
-bash scripts/inference/inference_diffusers_hunyuan.sh
+bash scripts/inference/inference_hunyuan_hf_quantization.sh
 ```
 For more information about the VRAM requirements for BitsAndBytes quantization, please refer to the table below (timing measured on an H100 GPU):
 
@@ -120,15 +121,44 @@ Then you can run the finetune with:
 bash scripts/finetune/finetune_mochi.sh # for mochi
 ```
 **Note that for finetuning, we did not tune the hyperparameters in the provided script**
-### ⚡ Lora Finetune
-Currently, we only provide Lora Finetune for Mochi model, the command for Lora Finetune is
+### ⚡ Lora Finetune 
+Demos and prompts of Black-Myth-Wukong can be found in [here](https://huggingface.co/FastVideo/Hunyuan-Black-Myth-Wukong-lora-weight). You can download the Lora weight through:
+```bash
+python scripts/huggingface/download_hf.py --repo_id=FastVideo/Hunyuan-Black-Myth-Wukong-lora-weight --local_dir=data/Hunyuan-Black-Myth-Wukong-lora-weight --repo_type=model
 ```
+Currently, both Mochi and Hunyuan models support Lora finetuning through diffusers. To generate personalized videos from your own dataset, you'll need to follow three main steps: dataset preparation, finetuning, and inference.
+
+#### Dataset Preparation
+We provide scripts to better help you get started to train on your own characters!  
+You can run this to organize your dataset to get the videos2caption.json before preprocess. Specify your video folder and corresponding caption folder(Caption files should be .txt files and have the same name with its video):
+```
+python scripts/dataset_preparation/prepare_json_file.py --video_dir data/input_videos/ --prompt_dir data/captions/ --output_path data/output_folder/videos2caption.json --verbose
+```
+Also, we provide script to resize your videos:
+```
+python scripts/data_preprocess/resize_videos.py \
+  --input_dir data/raw_videos/ \
+  --output_dir data/resized_videos/ \
+  --width 1280 \
+  --height 720 \
+  --fps 30
+```
+#### Finetuning
+After basic dataset preparation and preprocess, you can start to finetune your model using Lora:
+```
+bash scripts/finetune/finetune_hunyuan_hf_lora.sh
 bash scripts/finetune/finetune_mochi_lora.sh
 ```
-### Minimum Hardware Requirement
+#### Finetuning
+For inference with Lora checkpoint, you can run the following scripts with Additional parameter --lora_checkpoint_dir:
+```
+bash scripts/inference/inference_hunyuan_hf.sh 
+bash scripts/inference/inference_mochi_hf.sh 
+```
+#### Minimum Hardware Requirement
 - 40 GB GPU memory each for 2 GPUs with lora
 - 30 GB GPU memory each for 2 GPUs with CPU offload and lora.
-### Finetune with Both Image and Video
+#### Finetune with Both Image and Video
 Our codebase support finetuning with both image and video. 
 ```bash
 bash scripts/finetune/finetune_hunyuan.sh
