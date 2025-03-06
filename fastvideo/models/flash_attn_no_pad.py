@@ -3,6 +3,11 @@ from flash_attn import flash_attn_varlen_qkvpacked_func, flash_attn_varlen_kvpac
 from flash_attn.bert_padding import pad_input, unpad_input
 import torch
 
+from fastvideo.models.flex_sta_ref import get_sliding_tile_attention_mask
+
+from torch.nn.attention.flex_attention import flex_attention
+flex_attention = torch.compile(flex_attention, dynamic=False)
+
 def merge_attention_blocks(blocks):
     out = None
     lse = None
@@ -22,8 +27,6 @@ def merge_attention_blocks(blocks):
             out = torch.exp(lse - new_lse) * out + torch.exp(block_lse - new_lse) * block_out
             lse = new_lse
     return out, lse
-
-
 
 def flash_attn_no_pad(qkv, key_padding_mask, causal=False, dropout_p=0.0, softmax_scale=None):
     # adapted from https://github.com/Dao-AILab/flash-attention/blob/13403e81157ba37ca525890f2f0f2137edf75311/flash_attn/flash_attention.py#L27
@@ -86,6 +89,33 @@ def flash_attn_sta_no_pad(qkv, key_padding_mask, img_len, txt_len, causal=False,
     img_q = img_q.squeeze(1)
     txt_q = txt_q.squeeze(1)     
 
+    img_k, img_v = torch.split(img_kv, [1, 1], dim=1)
+    img_k_ = img_k.squeeze(1)
+    img_v_ = img_v.squeeze(1)
+
+    img_q_ = img_q.unsqueeze(0)
+    img_k_ = img_k_.unsqueeze(0)
+    img_v_ = img_v_.unsqueeze(0)
+
+    img_q_ = rearrange(img_q_, 'b s h d -> b h s d')
+    img_k_ = rearrange(img_k_, 'b s h d -> b h s d')
+    img_v_ = rearrange(img_v_, 'b s h d -> b h s d')
+    X_img2img_   =  torch.empty_like(img_q_)
+    lse_img2img_ =  torch.empty(img_q_.shape[:3], dtype=img_q_.dtype, device=img_q_.device)
+    kernel_size = (5, 6, 10)
+    window_sizes = [kernel_size] * 24
+
+    for head_index, window in enumerate(window_sizes):
+        q_head = img_q_[:, head_index:head_index +1]
+        k_head = img_k_[:, head_index:head_index +1]
+        v_head = img_v_[:, head_index:head_index +1]
+        mask = get_sliding_tile_attention_mask(window, (6, 8, 8), (30, 48, 80), 0, 'cuda', 0)
+        X_img2img_[:,head_index:head_index+1], lse_img2img_[:,head_index:head_index+1] = flex_attention(q_head, k_head, v_head, block_mask=mask, return_lse=True)
+    
+    X_img2img = rearrange(X_img2img_, 'b h s d -> b s h d')
+    X_img2img = X_img2img.squeeze(0)
+    lse_img2img = lse_img2img_.squeeze(0)
+    '''
     X_img2img, lse_img2img,  _ = flash_attn_varlen_kvpacked_func(
         img_q,
         img_kv,
@@ -98,6 +128,7 @@ def flash_attn_sta_no_pad(qkv, key_padding_mask, img_len, txt_len, causal=False,
         causal=causal,
         return_attn_probs=True,
     )
+    '''
     X_img2text, lse_img2text, _ = flash_attn_varlen_kvpacked_func(
                 img_q,
                 txt_kv,
