@@ -2,7 +2,7 @@ from einops import rearrange
 from flash_attn import flash_attn_varlen_qkvpacked_func, flash_attn_varlen_kvpacked_func
 from flash_attn.bert_padding import pad_input, unpad_input
 import torch
-
+import torch.nn.functional as F
 from fastvideo.models.flex_sta_ref import get_sliding_tile_attention_mask
 
 from torch.nn.attention.flex_attention import flex_attention
@@ -52,83 +52,50 @@ def flash_attn_no_pad(qkv, key_padding_mask, causal=False, dropout_p=0.0, softma
     )
     return output
 
-
-def flash_attn_sta_no_pad(qkv, key_padding_mask, img_len, txt_len, causal=False, dropout_p=0.0, softmax_scale=None):
-    # adapted from https://github.com/Dao-AILab/flash-attention/blob/13403e81157ba37ca525890f2f0f2137edf75311/flash_attn/flash_attention.py#L27
-    batch_size = qkv.shape[0]
-    seqlen = qkv.shape[1]
-    nheads = qkv.shape[-2]
-
-    x = rearrange(qkv, "b s three h d -> b s (three h d)")
-
-    x_unpad, indices, cu_seqlens, max_s, used_seqlens_in_batch = unpad_input(x, key_padding_mask)
-
-    x_unpad = rearrange(x_unpad, "nnz (three h d) -> nnz three h d", three=3, h=nheads)
+def flash_attn_sta(q, k, v, text_mask, causal=False, dropout_p=0.0, softmax_scale=None):
+    img_q, txt_q = q
+    img_k, txt_k = k
+    img_v, txt_v = v
     
-    '''
-    output_unpad, lse, _ = flash_attn_varlen_qkvpacked_func(
-        x_unpad,
-        cu_seqlens,
-        max_s,
-        dropout_p,
-        softmax_scale=softmax_scale,
-        causal=causal,
-        return_attn_probs=True,
-    )
-    #print(x_unpad.shape, cu_seqlens, max_s, output_unpad.shape)
-    '''
+    txt_max_len = txt_q.size(1)
+    img_len     = img_q.size(1)
+    txt_len     = text_mask.sum().item()
+    cu_img_len  = torch.tensor([0, img_len], dtype=torch.int32, device=img_q.device)
+    cu_txt_len  = torch.tensor([0, txt_len], dtype=torch.int32, device=img_q.device)
+    
+    #取有效长度txt
+    txt_q = txt_q[:, :txt_len, :, :]
+    txt_k = txt_k[:, :txt_len, :, :]
+    txt_v = txt_v[:, :txt_len, :, :]
 
-    img_len = img_len
-    txt_len = txt_len
-    cu_img_len =  torch.tensor([0, img_len], dtype=cu_seqlens.dtype, device=cu_seqlens.device)
-    cu_txt_len = torch.tensor([0, txt_len], dtype=cu_seqlens.dtype, device=cu_seqlens.device)
-    x_unpad_img, x_unpad_txt = torch.split(x_unpad, [img_len, txt_len])
-    img_q, img_kv = torch.split(x_unpad_img, [1, 2], dim=1)
-    txt_q, txt_kv = torch.split(x_unpad_txt, [1, 2], dim=1)
+    txt_kv = torch.stack([txt_k, txt_v], dim=2)
+    img_kv = torch.stack([img_k, img_v], dim=2)
+    #flex_attention格式要求 b h s d
+    img_q = rearrange(img_q, 'b s h d -> b h s d')
+    img_k = rearrange(img_k, 'b s h d -> b h s d')
+    img_v = rearrange(img_v, 'b s h d -> b h s d')
 
-    img_q = img_q.squeeze(1)
-    txt_q = txt_q.squeeze(1)     
+    img_q = img_q.contiguous()
+    img_k = img_k.contiguous()
+    img_v = img_v.contiguous()
 
-    img_k, img_v = torch.split(img_kv, [1, 1], dim=1)
-    img_k_ = img_k.squeeze(1)
-    img_v_ = img_v.squeeze(1)
+    X_img2img_   =  torch.empty_like(img_q)
+    lse_img2img_ =  torch.empty(img_q.shape[:3], dtype=img_q.dtype, device=img_q.device)
 
-    img_q_ = img_q.unsqueeze(0)
-    img_k_ = img_k_.unsqueeze(0)
-    img_v_ = img_v_.unsqueeze(0)
-
-    img_q_ = rearrange(img_q_, 'b s h d -> b h s d')
-    img_k_ = rearrange(img_k_, 'b s h d -> b h s d')
-    img_v_ = rearrange(img_v_, 'b s h d -> b h s d')
-    X_img2img_   =  torch.empty_like(img_q_)
-    lse_img2img_ =  torch.empty(img_q_.shape[:3], dtype=img_q_.dtype, device=img_q_.device)
     kernel_size = (5, 6, 10)
-    window_sizes = [kernel_size] * 24
+    mask = get_sliding_tile_attention_mask(kernel_size, (6, 8, 8), (30, 48, 80), 0, 'cuda', 0)
 
-    for head_index, window in enumerate(window_sizes):
-        q_head = img_q_[:, head_index:head_index +1]
-        k_head = img_k_[:, head_index:head_index +1]
-        v_head = img_v_[:, head_index:head_index +1]
-        mask = get_sliding_tile_attention_mask(window, (6, 8, 8), (30, 48, 80), 0, 'cuda', 0)
-        X_img2img_[:,head_index:head_index+1], lse_img2img_[:,head_index:head_index+1] = flex_attention(q_head, k_head, v_head, block_mask=mask, return_lse=True)
-    
+    X_img2img_, lse_img2img_ = flex_attention(img_q, img_k, img_v, block_mask=mask, return_lse=True)
     X_img2img = rearrange(X_img2img_, 'b h s d -> b s h d')
     X_img2img = X_img2img.squeeze(0)
     lse_img2img = lse_img2img_.squeeze(0)
-    '''
-    X_img2img, lse_img2img,  _ = flash_attn_varlen_kvpacked_func(
-        img_q,
-        img_kv,
-        cu_seqlens_q = cu_img_len,
-        max_seqlen_q = img_len,
-        cu_seqlens_k = cu_img_len,
-        max_seqlen_k = img_len,
-        dropout_p = dropout_p,
-        softmax_scale=softmax_scale,
-        causal=causal,
-        return_attn_probs=True,
-    )
-    '''
+
+    #flash attention格式 s h d， 不支持batch
+    img_q = rearrange(img_q, 'b h s d -> b s h d')
+    img_q  = img_q.squeeze(0)
+    img_kv = img_kv.squeeze(0)
+    txt_q  = txt_q.squeeze(0)
+    txt_kv = txt_kv.squeeze(0)
     X_img2text, lse_img2text, _ = flash_attn_varlen_kvpacked_func(
                 img_q,
                 txt_kv,
@@ -141,6 +108,7 @@ def flash_attn_sta_no_pad(qkv, key_padding_mask, img_len, txt_len, causal=False,
                 causal=causal,
                 return_attn_probs=True,
     )
+
     X_text2img, lse_text2img, _   = flash_attn_varlen_kvpacked_func(
                 txt_q,
                 img_kv,
@@ -177,13 +145,12 @@ def flash_attn_sta_no_pad(qkv, key_padding_mask, img_len, txt_len, causal=False,
     (X_text2img, lse_text2img),
     (X_text2text, lse_text2text)
     ])
-    output_unpad = torch.cat([merged_img_out.to(img_q.dtype), merged_text_out.to(txt_q.dtype)], dim=0)
 
+    hidden_states = merged_img_out.to(txt_q.dtype)
+    encoder_hidden_states = merged_text_out.to(txt_q.dtype)
+    encoder_hidden_states = F.pad(encoder_hidden_states, (0, 0, 0, 0, 0, txt_max_len - txt_len))
+    #加上batch维度
+    hidden_states = hidden_states.unsqueeze(0)
+    encoder_hidden_states = encoder_hidden_states.unsqueeze(0)
 
-    output = rearrange(
-        pad_input(rearrange(output_unpad, "nnz h d -> nnz (h d)"), indices, batch_size, seqlen),
-        "b s (h d) -> b s h d",
-        h=nheads,
-    )
-
-    return output
+    return hidden_states, encoder_hidden_states

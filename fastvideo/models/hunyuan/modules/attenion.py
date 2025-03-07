@@ -1,6 +1,9 @@
 import torch
 import torch.nn.functional as F
 from einops import rearrange
+import inspect
+
+from flash_attn.flash_attn_interface import _flash_attn_forward, _flash_attn_backward
 
 try:
     from st_attn import sliding_tile_attention
@@ -8,10 +11,30 @@ except ImportError:
     print("Could not load Sliding Tile Attention.")
     sliding_tile_attention = None
 
-from fastvideo.models.flash_attn_no_pad import flash_attn_no_pad, flash_attn_sta_no_pad
+from fastvideo.models.flash_attn_no_pad import flash_attn_no_pad, flash_attn_sta
 from fastvideo.utils.communications import all_gather, all_to_all_4D
 from fastvideo.utils.parallel_states import get_sequence_parallel_state, nccl_info
+import os
 
+def printf(*args, **kwargs):
+    """
+    An enhanced print function that includes the file name and line number.
+
+    Args:
+        *args: The values to be printed.
+        **kwargs: The keyword arguments to be passed to the built-in print function.
+    """
+    # Get the current file name and line number
+    frame = inspect.currentframe().f_back
+    file_name = os.path.basename(frame.f_code.co_filename)
+    line_number = frame.f_lineno
+
+    # Construct the output string
+    output = f"{file_name}:{line_number} - "
+    output += " ".join(str(arg) for arg in args)
+
+    # Print the output
+    print(output, **kwargs)
 
 def attention(
     q,
@@ -59,6 +82,9 @@ def untile(x, sp_size):
 
 
 def parallel_attention(q, k, v, img_q_len, img_kv_len, text_mask, mask_strategy=None):
+
+   
+
     query, encoder_query = q
     key, encoder_key = k
     value, encoder_value = v
@@ -78,53 +104,17 @@ def parallel_attention(q, k, v, img_q_len, img_kv_len, text_mask, mask_strategy=
         encoder_key = shrink_head(encoder_key, dim=2)
         encoder_value = shrink_head(encoder_value, dim=2)
         # [b, s, h, d]
-
-    sequence_length = query.size(1)
-    encoder_sequence_length = encoder_query.size(1)
-
-    if mask_strategy[0] is not None:
-        query = torch.cat([tile(query, nccl_info.sp_size), encoder_query], dim=1).transpose(1, 2)
-        key = torch.cat([tile(key, nccl_info.sp_size), encoder_key], dim=1).transpose(1, 2)
-        value = torch.cat([tile(value, nccl_info.sp_size), encoder_value], dim=1).transpose(1, 2)
-
-        head_num = query.size(1)
-        current_rank = nccl_info.rank_within_group
-        start_head = current_rank * head_num
-        windows = [mask_strategy[head_idx + start_head] for head_idx in range(head_num)]
-
-        hidden_states = sliding_tile_attention(query, key, value, windows, text_length).transpose(1, 2)
-    else:
-        query = torch.cat([query, encoder_query], dim=1)
-        key = torch.cat([key, encoder_key], dim=1)
-        value = torch.cat([value, encoder_value], dim=1)
-        # B, S, 3, H, D
-        qkv = torch.stack([query, key, value], dim=2)
-
-        attn_mask = F.pad(text_mask, (sequence_length, 0), value=True)
-        hidden_states = flash_attn_sta_no_pad(qkv,
-                                    attn_mask,
-                                    img_len=sequence_length,
-                                    txt_len=text_length.item(),
-                                    causal=False,
-                                    dropout_p=0.0,
-                                    softmax_scale=None)
-
-    hidden_states, encoder_hidden_states = hidden_states.split_with_sizes((sequence_length, encoder_sequence_length),
-                                                                          dim=1)
-
-    if mask_strategy[0] is not None:
-        hidden_states = untile(hidden_states, nccl_info.sp_size)
+   
+    hidden_states, encoder_hidden_states = flash_attn_sta(q, k,v, text_mask)
+  
 
     if get_sequence_parallel_state():
         hidden_states = all_to_all_4D(hidden_states, scatter_dim=1, gather_dim=2)
         encoder_hidden_states = all_gather(encoder_hidden_states, dim=2).contiguous()
-
-    hidden_states = hidden_states.to(query.dtype)
-    encoder_hidden_states = encoder_hidden_states.to(query.dtype)
+ 
 
     attn = torch.cat([hidden_states, encoder_hidden_states], dim=1)
 
     b, s, a, d = attn.shape
     attn = attn.reshape(b, s, -1)
-
     return attn
